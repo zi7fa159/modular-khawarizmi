@@ -4,7 +4,7 @@
 
 String askQuestion(String prompt) {
     // Local Constants - Only Used Inside this Function
-    const char* GEMINI_TOKEN = "AIzaSyBk_lWhh6ns1OwCB942iFpPucpg8JMTwic";
+    const char* GEMINI_TOKEN = "YOUR_API_KEY";
     const char* MAX_TOKENS = "100";
 
     // Format the prompt
