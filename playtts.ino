@@ -3,9 +3,8 @@
 #include "UrlEncode.h" 
 #include "WiFi.h"
 
-extern Audio audio;  // Use global `audio` from main file
-
 void playTTS(String text) {
+    Audio audio;
     // HARD-CODED CONSTANTS
     audio.setPinout(26, 25, 22);  // I2S_BCLK, I2S_LRC, I2S_DOUT
     audio.setVolume(100);  
