@@ -6,7 +6,7 @@
 
 // Function to record audio and save it as a WAV file
 bool recordAudio() {
-    const int I2S_PORT = I2S_NUM_0;
+    const i2s_port_t I2S_PORT = I2S_NUM_0; // Fixed type from int to i2s_port_t
     const int I2S_WS = 15;
     const int I2S_SCK = 14;
     const int I2S_SD = 32;
@@ -18,8 +18,6 @@ bool recordAudio() {
     const int BUF_SIZE = 512;
     const char* FILENAME = "/rec.wav";
 
-    bool i2s_installed = false;
-    
     Serial.println("Initializing I2S...");
 
     i2s_config_t i2s_config = {
@@ -45,7 +43,6 @@ bool recordAudio() {
         Serial.println("ERROR - I2S installation failed!");
         return false;
     }
-    i2s_installed = true;
 
     if (i2s_set_pin(I2S_PORT, &pin_config) != ESP_OK) {
         Serial.println("ERROR - I2S pin configuration failed!");
