@@ -10,7 +10,7 @@ void wifim() {
 
     // reset settings - wipe stored credentials for testing
     // these are stored by the ESP library
-    // wm.resetSettings();
+    wm.resetSettings();
 
     bool res;
 
