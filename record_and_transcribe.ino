@@ -4,9 +4,11 @@
 #include <ArduinoJson.h>
 #include <driver/i2s.h>
 
+const char* deepgramApiKey = "YOUR_DEEPGRAM_API_KEY";
+
 // Function to record audio and save it as a WAV file
 bool recordAudio() {
-    const i2s_port_t I2S_PORT = I2S_NUM_0; // Fixed type from int to i2s_port_t
+    const i2s_port_t I2S_PORT = I2S_NUM_0;
     const int I2S_WS = 15;
     const int I2S_SCK = 14;
     const int I2S_SD = 32;
@@ -86,7 +88,7 @@ bool recordAudio() {
 }
 
 // Function to send recorded audio to Deepgram API
-String transcribeAudio(const char* deepgramApiKey) {
+String transcribeAudio() {
     const char* FILENAME = "/rec.wav";
 
     Serial.println("Connecting to Deepgram...");
@@ -159,23 +161,67 @@ String parseTranscription(String response) {
 }
 
 // Function to handle full audio recording and transcription process
-String recordAndTranscribe(const char* deepgramApiKey) {
+String recordAndTranscribe() {
     Serial.println("Initializing SPIFFS...");
     if (!SPIFFS.begin(true)) {
         Serial.println("ERROR - SPIFFS initialization failed!");
         return "";
     }
+    Serial.println("SPIFFS initialized successfully.");
 
+    Serial.println("Starting audio recording...");
     if (!recordAudio()) {
-        Serial.println("Recording failed!");
+        Serial.println("ERROR - Recording failed!");
         return "";
     }
+    Serial.println("Recording complete.");
 
-    String jsonResponse = transcribeAudio(deepgramApiKey);
+    Serial.println("Sending audio to Deepgram...");
+    String jsonResponse = transcribeAudio();
+    Serial.println("Response received from Deepgram.");
+
     if (jsonResponse.isEmpty()) {
-        Serial.println("Transcription request failed!");
+        Serial.println("ERROR - Transcription request failed!");
         return "";
     }
 
-    return parseTranscription(jsonResponse);
+    Serial.println("Parsing transcription response...");
+    String transcript = parseTranscription(jsonResponse);
+    Serial.println("Transcript parsed successfully.");
+
+    return transcript;
+}
+
+// WiFi connection function (assuming it exists)
+void wifim() {
+    WiFi.begin("YOUR_SSID", "YOUR_PASSWORD");
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        Serial.print(".");
+    }
+    Serial.println("\nWiFi connected.");
+    Serial.print("IP Address: ");
+    Serial.println(WiFi.localIP());
+}
+
+void setup() {
+    Serial.begin(115200);
+    Serial.println("Initializing...");
+
+    Serial.println("Calling wifim()...");
+    wifim(); // Call the WiFi initialization function
+    Serial.println("WiFi initialized.");
+
+    Serial.println("Calling recordAndTranscribe()...");
+    String result = recordAndTranscribe(); // Call the transcription function
+
+    if (result.length() > 0) {
+        Serial.println("Final Transcript: " + result);
+    } else {
+        Serial.println("Transcription failed.");
+    }
+}
+
+void loop() {
+  // Put your main code here, to run repeatedly:
 }
