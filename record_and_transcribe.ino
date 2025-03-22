@@ -4,9 +4,6 @@
 #include <ArduinoJson.h>
 #include <driver/i2s.h>
 
-const char* deepgramApiKey = "YOUR_DEEPGRAM_API_KEY";
-
-// Function to record audio and save it as a WAV file
 bool recordAudio() {
     const i2s_port_t I2S_PORT = I2S_NUM_0;
     const int I2S_WS = 15;
@@ -16,7 +13,7 @@ bool recordAudio() {
     const int SAMPLE_BITS = 16;
     const int BYTES_PER_SAMPLE = SAMPLE_BITS / 8;
     const int WAV_HDR_SIZE = 44;
-    const int RECORD_TIME = 5; // seconds
+    const int RECORD_TIME = 5;
     const int BUF_SIZE = 512;
     const char* FILENAME = "/rec.wav";
 
@@ -25,7 +22,7 @@ bool recordAudio() {
     i2s_config_t i2s_config = {
         .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
         .sample_rate = SAMPLE_RATE,
-        .bits_per_sample = (i2s_bits_per_sample_t)SAMPLE_BITS,
+        .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
         .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
         .communication_format = I2S_COMM_FORMAT_I2S,
         .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
@@ -87,8 +84,7 @@ bool recordAudio() {
     return totalAudioBytes > 0;
 }
 
-// Function to send recorded audio to Deepgram API
-String transcribeAudio() {
+String transcribeAudio(const char* deepgramApiKey) {
     const char* FILENAME = "/rec.wav";
 
     Serial.println("Connecting to Deepgram...");
@@ -139,7 +135,6 @@ String transcribeAudio() {
     return response;
 }
 
-// Function to parse JSON response and extract transcript
 String parseTranscription(String response) {
     DynamicJsonDocument doc(2048);
     DeserializationError jsonError = deserializeJson(doc, response);
@@ -160,8 +155,7 @@ String parseTranscription(String response) {
     }
 }
 
-// Function to handle full audio recording and transcription process
-String recordAndTranscribe() {
+String recordAndTranscribe(const char* deepgramApiKey) {
     Serial.println("Initializing SPIFFS...");
     if (!SPIFFS.begin(true)) {
         Serial.println("ERROR - SPIFFS initialization failed!");
@@ -177,7 +171,7 @@ String recordAndTranscribe() {
     Serial.println("Recording complete.");
 
     Serial.println("Sending audio to Deepgram...");
-    String jsonResponse = transcribeAudio();
+    String jsonResponse = transcribeAudio(deepgramApiKey);
     Serial.println("Response received from Deepgram.");
 
     if (jsonResponse.isEmpty()) {
@@ -190,38 +184,4 @@ String recordAndTranscribe() {
     Serial.println("Transcript parsed successfully.");
 
     return transcript;
-}
-
-// WiFi connection function (assuming it exists)
-void wifim() {
-    WiFi.begin("YOUR_SSID", "YOUR_PASSWORD");
-    while (WiFi.status() != WL_CONNECTED) {
-        delay(500);
-        Serial.print(".");
-    }
-    Serial.println("\nWiFi connected.");
-    Serial.print("IP Address: ");
-    Serial.println(WiFi.localIP());
-}
-
-void setup() {
-    Serial.begin(115200);
-    Serial.println("Initializing...");
-
-    Serial.println("Calling wifim()...");
-    wifim(); // Call the WiFi initialization function
-    Serial.println("WiFi initialized.");
-
-    Serial.println("Calling recordAndTranscribe()...");
-    String result = recordAndTranscribe(); // Call the transcription function
-
-    if (result.length() > 0) {
-        Serial.println("Final Transcript: " + result);
-    } else {
-        Serial.println("Transcription failed.");
-    }
-}
-
-void loop() {
-  // Put your main code here, to run repeatedly:
 }
