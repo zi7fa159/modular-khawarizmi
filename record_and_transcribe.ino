@@ -29,7 +29,7 @@ const int I2S_SD        = 32; // Serial Data / DIN
 const int SAMPLE_RATE   = 16000; // 16kHz sample rate
 const int SAMPLE_BITS   = 16;    // 16 bits per sample
 const int BYTES_PER_SAMPLE = (SAMPLE_BITS / 8); // 2 bytes
-const int RECORD_TIME   = 5;     // seconds to record
+const int RECORD_TIME   = 10;     // seconds to record
 const int I2S_BUFFER_SIZE = 512; // Bytes for I2S read buffer
 const int DMA_BUFFER_COUNT= 4;   // Number of DMA buffers
 // Correct calculation: total_bytes / (count * bytes_per_sample * channels)
@@ -312,6 +312,11 @@ String transcribeAudio() {
     Serial.printf("ERROR - HTTPS request failed. Error: %s\n", https.errorToString(httpCode).c_str());
     response = ""; // Return empty string on connection error
   }
+  // ***** ADD THIS LINE *****
+      Serial.println("--- RAW DEEPGRAM JSON RESPONSE ---");
+      Serial.println(response);
+      Serial.println("------------------------------------");
+      // **************************
 
   https.end(); // Release resources
 
