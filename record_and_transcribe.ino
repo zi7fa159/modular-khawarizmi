@@ -1,36 +1,48 @@
+// --- audio_functions.ino ---
+// Put this file in the same folder as your main sketch (e.g., Myproject.ino)
+// This file should NOT contain setup() or loop()
+
 #include <Arduino.h> // Good practice to include in library-like .ino files
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
-#include "SPIFFS.h"
+#include "SPIFFS.h" // Needs to be included here AND in the main .ino file
 #include <ArduinoJson.h>
 #include <driver/i2s.h>
 
+// --- IMPORTANT EXTERNAL REQUIREMENTS ---
+// 1. WiFi MUST be connected before calling transcribeAudio() or recordAndTranscribe().
+// 2. SPIFFS MUST be initialized with SPIFFS.begin() in the main setup() before calling any function here.
+// 3. Partition Scheme: Ensure you've selected a partition scheme in Arduino IDE Tools menu
+//    that provides sufficient SPIFFS space (e.g., Default, Huge App, or >= 1MB SPIFFS).
+//    Re-upload after changing the partition scheme.
+// ---
+
 // Deepgram API key – replace with your actual key
-const char* deepgramApiKey = "..."; // Keep your key secure!
+const char* deepgramApiKey = "YOUR_DEEPGRAM_API_KEY"; // <-- PUT YOUR KEY HERE
 
 // I2S and recording settings
 const i2s_port_t I2S_PORT = I2S_NUM_0;
-const int I2S_WS        = 15;
-const int I2S_SCK       = 14;
-const int I2S_SD        = 32;
-const int SAMPLE_RATE   = 16000;
-const int SAMPLE_BITS   = 16;
-const int BYTES_PER_SAMPLE = (SAMPLE_BITS / 8);
-const int WAV_HDR_SIZE  = 44;
-const int RECORD_TIME   = 5;      // seconds
-const int BUF_SIZE      = 512;    // Bytes for DMA buffer
-const char* FILENAME    = "/rec.wav";
+const int I2S_WS        = 15; // Word Select / LRCL
+const int I2S_SCK       = 14; // Bit Clock / BCLK
+const int I2S_SD        = 32; // Serial Data / DIN
+const int SAMPLE_RATE   = 16000; // 16kHz sample rate
+const int SAMPLE_BITS   = 16;    // 16 bits per sample
+const int BYTES_PER_SAMPLE = (SAMPLE_BITS / 8); // 2 bytes
+const int RECORD_TIME   = 5;     // seconds to record
+const int I2S_BUFFER_SIZE = 512; // Bytes for I2S read buffer
+const int DMA_BUFFER_COUNT= 4;   // Number of DMA buffers
+// Correct calculation: total_bytes / (count * bytes_per_sample * channels)
+const int DMA_BUFFER_LEN  = I2S_BUFFER_SIZE / DMA_BUFFER_COUNT / BYTES_PER_SAMPLE; // Samples per DMA buffer (512 / 4 / 2 = 64)
 
-// Flag to track if I2S driver is installed (might need careful management if called concurrently)
+// WAV File Settings
+const int WAV_HDR_SIZE  = 44;    // Size of a standard WAV header
+const char* FILENAME    = "/rec.wav"; // Filename on SPIFFS
+
+// Global flag for I2S state (use cautiously if functions could be interrupted)
 bool i2s_installed = false;
 
-// Task watchdog timeout value (increased to prevent timeout) - Note: WDT is managed globally
-const int WDT_TIMEOUT = 30;   // seconds (This constant might not be directly used here now)
-
 // --- Function Prototypes ---
-// These allow functions to be called even if defined later in the file.
-// The Arduino IDE *tries* to auto-generate these, but explicitly defining them is safer.
 bool recordAudio();
 String transcribeAudio();
 String parseTranscription(String response);
@@ -38,22 +50,25 @@ String recordAndTranscribe();
 // --- End Prototypes ---
 
 
-// Record audio to file
-// Returns true on success, false on failure.
+/**
+ * @brief Records audio from I2S microphone to a WAV file on SPIFFS.
+ * @return true if recording succeeded without errors and data was written, false otherwise.
+ */
 bool recordAudio() {
-  // Ensure Serial is initialized in the main setup() before calling this
+  // Ensure Serial is initialized in the main setup()
   Serial.println("Initializing I2S...");
+  bool recording_success = true; // Flag to track success throughout the process
 
   // Configure I2S
   i2s_config_t i2s_config = {
     .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
     .sample_rate = SAMPLE_RATE,
     .bits_per_sample = (i2s_bits_per_sample_t)SAMPLE_BITS,
-    .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT, // Assuming mono microphone
-    .communication_format = I2S_COMM_FORMAT_STAND_I2S, // Standard I2S format
+    .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT, // Mono microphone
+    .communication_format = I2S_COMM_FORMAT_STAND_I2S,
     .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-    .dma_buf_count = 4, // Number of DMA buffers
-    .dma_buf_len = BUF_SIZE / 4, // Size of each DMA buffer in samples (BUF_SIZE must be multiple of dma_buf_count*bytes_per_sample*channels)
+    .dma_buf_count = DMA_BUFFER_COUNT,
+    .dma_buf_len = DMA_BUFFER_LEN, // Corrected calculation
     .use_apll = false
   };
 
@@ -64,52 +79,55 @@ bool recordAudio() {
     .data_in_num = I2S_SD
   };
 
-  // Install & configure I2S driver
+  // Install I2S driver
   esp_err_t err = i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
   if (err != ESP_OK) {
-    Serial.printf("ERROR - I2S installation failed! Code: %d\n", err);
-    return false;
+    Serial.printf("ERROR - I2S Driver Install failed! Code: %d\n", err);
+    return false; // Cannot proceed
   }
-  i2s_installed = true; // Mark as installed
+  i2s_installed = true;
 
+  // Set I2S pins
   err = i2s_set_pin(I2S_PORT, &pin_config);
   if (err != ESP_OK) {
-    Serial.printf("ERROR - I2S pin configuration failed! Code: %d\n", err);
-    i2s_driver_uninstall(I2S_PORT); // Clean up
+    Serial.printf("ERROR - I2S Pin Configuration failed! Code: %d\n", err);
+    i2s_driver_uninstall(I2S_PORT);
     i2s_installed = false;
-    return false;
+    return false; // Cannot proceed
   }
 
-  // Clear DMA buffers (good practice before starting)
+  // Clear DMA buffer (good practice)
   err = i2s_zero_dma_buffer(I2S_PORT);
-   if (err != ESP_OK) {
-    Serial.printf("ERROR - Failed to zero DMA buffer! Code: %d\n", err);
-    // Continue but log error
+  if (err != ESP_OK) {
+    Serial.printf("Warning - Failed to zero I2S DMA buffer. Code: %d\n", err);
+    // Continue, but note potential stale data if error repeats
   }
 
+  // Start I2S
   err = i2s_start(I2S_PORT);
-   if (err != ESP_OK) {
+  if (err != ESP_OK) {
     Serial.printf("ERROR - Failed to start I2S! Code: %d\n", err);
     i2s_driver_uninstall(I2S_PORT);
     i2s_installed = false;
-    return false;
+    return false; // Cannot proceed
   }
 
-  // Open file for recording (ensure SPIFFS is begun in main setup())
-  File audioFile = SPIFFS.open(FILENAME, "w");
+  // --- File Handling ---
+  // Ensure SPIFFS is already initialized via SPIFFS.begin() in main setup()
+  File audioFile = SPIFFS.open(FILENAME, "w"); // Open in write mode (creates/truncates)
   if (!audioFile) {
-    Serial.println("ERROR - Failed to open file for writing");
+    Serial.println("ERROR - Failed to open file for writing! Check SPIFFS.begin() in setup().");
     i2s_stop(I2S_PORT);
     i2s_driver_uninstall(I2S_PORT);
     i2s_installed = false;
-    return false;
+    return false; // Cannot proceed
   }
 
-  // Write a temporary header (will be updated later)
+  // Write a placeholder WAV header
   uint8_t wavHeader[WAV_HDR_SIZE] = {0};
   size_t written = audioFile.write(wavHeader, WAV_HDR_SIZE);
-   if (written != WAV_HDR_SIZE) {
-      Serial.println("ERROR - Failed to write temporary WAV header");
+  if (written != WAV_HDR_SIZE) {
+      Serial.println("ERROR - Failed to write temporary WAV header to file!");
       audioFile.close();
       i2s_stop(I2S_PORT);
       i2s_driver_uninstall(I2S_PORT);
@@ -117,234 +135,225 @@ bool recordAudio() {
       return false;
   }
 
-
-  // Record audio data
+  // --- Recording Loop ---
   Serial.println("Recording...");
-  // Buffer to hold data read from I2S DMA
-  uint8_t i2s_read_buffer[BUF_SIZE]; // Use byte buffer matching DMA size
+  uint8_t i2s_read_buffer[I2S_BUFFER_SIZE]; // Buffer to hold data from I2S driver
   size_t bytesRead = 0;
-  uint32_t totalAudioBytes = 0;
+  uint32_t totalAudioBytes = 0; // Track successfully written audio bytes
   uint32_t startTime = millis();
 
   while (millis() - startTime < (uint32_t)RECORD_TIME * 1000) {
-    // Read data from I2S driver buffer
-    esp_err_t read_err = i2s_read(I2S_PORT, i2s_read_buffer, BUF_SIZE, &bytesRead, pdMS_TO_TICKS(1000)); // Wait up to 1 sec
+    // Read data from I2S into buffer
+    esp_err_t read_err = i2s_read(I2S_PORT, i2s_read_buffer, I2S_BUFFER_SIZE, &bytesRead, pdMS_TO_TICKS(100)); // Shorter timeout
 
     if (read_err == ESP_OK && bytesRead > 0) {
-      // Write read data to SPIFFS file
+      // Write the received data to the file
       size_t written_bytes = audioFile.write(i2s_read_buffer, bytesRead);
+
+      // *** CRITICAL CHECK: Verify all bytes were written ***
       if (written_bytes == bytesRead) {
-          totalAudioBytes += bytesRead;
+          totalAudioBytes += bytesRead; // Increment only if write was successful
       } else {
-          Serial.println("ERROR - Failed to write all bytes to SPIFFS!");
-          // Consider stopping recording on write error
-          break;
+          Serial.println("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+          Serial.println("ERROR - Failed to write all bytes to SPIFFS! DISK FULL?");
+          Serial.println("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+          recording_success = false; // Mark recording as failed
+          break; // Exit the recording loop immediately
       }
     } else if (read_err == ESP_ERR_TIMEOUT) {
-        Serial.println("Warning: i2s_read timed out.");
-        // Continue loop, maybe no data available yet
-    }
-    else {
+        // Ignore timeout, maybe no data ready yet
+        // Serial.print("."); // Uncomment for verbose logging of timeouts
+    } else {
         Serial.printf("ERROR - i2s_read failed! Code: %d\n", read_err);
-        // Consider stopping recording on read error
-        break;
+        recording_success = false; // Mark recording as failed
+        break; // Exit the recording loop on read error
     }
-    // Yield to allow other tasks (like WiFi) to run
-    yield();
+    yield(); // Allow other tasks (like WiFi) to run
   }
 
-  Serial.printf("Finished recording loop. Total audio bytes: %u\n", totalAudioBytes);
+  Serial.printf("Finished recording loop. Status OK: %s, Bytes Attempted/Written: %u\n", recording_success ? "Yes" : "No", totalAudioBytes);
 
-  // Stop I2S *before* finalizing the file
+  // Stop I2S *before* finalizing file header or uninstalling driver
   i2s_stop(I2S_PORT);
 
-
   // --- Finalize WAV Header ---
-  uint32_t fileSize = totalAudioBytes + WAV_HDR_SIZE - 8; // Overall file size minus RIFF and size fields
-  uint32_t byteRate = SAMPLE_RATE * 1 * BYTES_PER_SAMPLE; // SampleRate * NumChannels * BytesPerSample
-  uint16_t blockAlign = 1 * BYTES_PER_SAMPLE; // NumChannels * BytesPerSample
+  // Calculate final sizes based on successfully written bytes
+  uint32_t fileSize = totalAudioBytes + WAV_HDR_SIZE - 8;
+  uint32_t byteRate = SAMPLE_RATE * 1 * BYTES_PER_SAMPLE; // Mono
+  uint16_t blockAlign = 1 * BYTES_PER_SAMPLE; // Mono
 
-  // RIFF chunk descriptor
+  // RIFF chunk
   wavHeader[0] = 'R'; wavHeader[1] = 'I'; wavHeader[2] = 'F'; wavHeader[3] = 'F';
-  wavHeader[4] = (uint8_t)(fileSize & 0xFF);
-  wavHeader[5] = (uint8_t)((fileSize >> 8) & 0xFF);
-  wavHeader[6] = (uint8_t)((fileSize >> 16) & 0xFF);
-  wavHeader[7] = (uint8_t)((fileSize >> 24) & 0xFF);
+  memcpy(&wavHeader[4], &fileSize, 4);
   wavHeader[8] = 'W'; wavHeader[9] = 'A'; wavHeader[10] = 'V'; wavHeader[11] = 'E';
-
-  // "fmt " sub-chunk
+  // fmt chunk
   wavHeader[12] = 'f'; wavHeader[13] = 'm'; wavHeader[14] = 't'; wavHeader[15] = ' ';
-  wavHeader[16] = 16; wavHeader[17] = 0; wavHeader[18] = 0; wavHeader[19] = 0; // Subchunk1Size (16 for PCM)
-  wavHeader[20] = 1; wavHeader[21] = 0; // AudioFormat (1 for PCM)
-  wavHeader[22] = 1; wavHeader[23] = 0; // NumChannels (1 for mono)
-  wavHeader[24] = (uint8_t)(SAMPLE_RATE & 0xFF);
-  wavHeader[25] = (uint8_t)((SAMPLE_RATE >> 8) & 0xFF);
-  wavHeader[26] = (uint8_t)((SAMPLE_RATE >> 16) & 0xFF);
-  wavHeader[27] = (uint8_t)((SAMPLE_RATE >> 24) & 0xFF);
-  wavHeader[28] = (uint8_t)(byteRate & 0xFF);
-  wavHeader[29] = (uint8_t)((byteRate >> 8) & 0xFF);
-  wavHeader[30] = (uint8_t)((byteRate >> 16) & 0xFF);
-  wavHeader[31] = (uint8_t)((byteRate >> 24) & 0xFF);
-  wavHeader[32] = (uint8_t)(blockAlign & 0xFF); // BlockAlign
-  wavHeader[33] = (uint8_t)((blockAlign >> 8) & 0xFF);
-  wavHeader[34] = (uint8_t)(SAMPLE_BITS & 0xFF); // BitsPerSample
-  wavHeader[35] = (uint8_t)((SAMPLE_BITS >> 8) & 0xFF);
-
-  // "data" sub-chunk
+  wavHeader[16] = 16; wavHeader[17] = 0; wavHeader[18] = 0; wavHeader[19] = 0; // PCM format size
+  wavHeader[20] = 1; wavHeader[21] = 0; // PCM format
+  wavHeader[22] = 1; wavHeader[23] = 0; // Mono channel
+  memcpy(&wavHeader[24], &SAMPLE_RATE, 4);
+  memcpy(&wavHeader[28], &byteRate, 4);
+  memcpy(&wavHeader[32], &blockAlign, 2);
+  memcpy(&wavHeader[34], &SAMPLE_BITS, 2);
+  // data chunk
   wavHeader[36] = 'd'; wavHeader[37] = 'a'; wavHeader[38] = 't'; wavHeader[39] = 'a';
-  wavHeader[40] = (uint8_t)(totalAudioBytes & 0xFF); // Subchunk2Size (data size)
-  wavHeader[41] = (uint8_t)((totalAudioBytes >> 8) & 0xFF);
-  wavHeader[42] = (uint8_t)((totalAudioBytes >> 16) & 0xFF);
-  wavHeader[43] = (uint8_t)((totalAudioBytes >> 24) & 0xFF);
+  memcpy(&wavHeader[40], &totalAudioBytes, 4); // Size of audio data
 
-  // Seek back to the beginning and write the correct header
+  // Seek to beginning and write the finalized header
   if (!audioFile.seek(0)) {
-     Serial.println("ERROR - Failed to seek to beginning of file");
-     // File might be corrupted, handle appropriately
+     Serial.println("ERROR - Failed to seek to beginning of WAV file to write header!");
+     recording_success = false; // Mark as failed if header can't be written
   } else {
       written = audioFile.write(wavHeader, WAV_HDR_SIZE);
-       if (written != WAV_HDR_SIZE) {
-          Serial.println("ERROR - Failed to write final WAV header");
-          // File might be corrupted
-       }
+      if (written != WAV_HDR_SIZE) {
+          Serial.println("ERROR - Failed to write final WAV header!");
+          recording_success = false; // Mark as failed
+      }
   }
 
-  audioFile.close(); // Close the file
+  // Close the file
+  audioFile.close();
+  Serial.printf("Audio file '%s' closed.\n", FILENAME);
 
-  // Uninstall I2S driver AFTER file is closed and header is written
+  // Uninstall I2S driver *after* file is closed
   if (i2s_installed) {
       err = i2s_driver_uninstall(I2S_PORT);
       if (err != ESP_OK) {
-          Serial.printf("ERROR - Failed to uninstall I2S driver! Code: %d\n", err);
+          // Log error but don't necessarily fail the whole recording if file ops succeeded
+          Serial.printf("Warning - Failed to uninstall I2S driver cleanly. Code: %d\n", err);
       }
-      i2s_installed = false; // Mark as uninstalled regardless of error
+      i2s_installed = false;
   }
 
-  Serial.printf("Recording complete: %u audio data bytes written to %s.\n", totalAudioBytes, FILENAME);
+  Serial.printf("Recording process finished. Overall Success: %s\n", recording_success ? "Yes" : "No");
 
-  return totalAudioBytes > 0; // Return true if some audio was recorded
+  // Return true ONLY if the recording_success flag is still true AND some audio data was written
+  return recording_success && (totalAudioBytes > 0);
 }
 
-// Send recorded audio to Deepgram API
-// Returns the JSON response string or an empty string on failure.
+
+/**
+ * @brief Sends the recorded WAV file to the Deepgram API for transcription.
+ * @return String containing the JSON response from Deepgram, or empty string on failure.
+ */
 String transcribeAudio() {
-  // Ensure WiFi is connected and SPIFFS is begun in the main sketch before calling
-  Serial.println("Connecting to Deepgram...");
+  // Ensure WiFi is connected and SPIFFS is begun in the main sketch
+  Serial.println("Preparing to send audio to Deepgram...");
 
-  // Allow a bit of time for the system to stabilize - maybe less needed here
-  yield();
-  // delay(100); // Shorter delay?
+  // Allow network stack time to stabilize if needed
+  yield(); delay(100);
 
-  // Create a secure client (use Root CA for production)
+  // Create secure client (Use Root CA for production!)
   WiFiClientSecure client;
-  // IMPORTANT: For production, use client.setCACert(rootCACertificate)
-  // instead of setInsecure(). Get the appropriate CA cert for api.deepgram.com.
-  client.setInsecure(); // For demo/testing ONLY
-  client.setTimeout(20000); // Increased timeout for potentially slow network/API
+  client.setInsecure(); // <<< FOR TESTING ONLY - Insecure! Use setCACert() in production.
+  client.setTimeout(20000); // 20 seconds timeout for connection and transfer
 
   HTTPClient https;
-  https.setReuse(false); // Less likely to cause issues on ESP32
+  https.setReuse(false); // Helps avoid state issues on ESP32
   https.setTimeout(20000); // Match client timeout
 
-  // Use HTTPS connection
-  if (!https.begin(client, "https://api.deepgram.com/v1/listen?model=nova-2-general&detect_language=true")) {
-    Serial.println("ERROR - HTTPS begin failed");
-    return ""; // Return empty on failure
+  // Construct Deepgram API URL
+  String deepgramURL = "https://api.deepgram.com/v1/listen?model=nova-2&language=en"; // Example: Specify model and language
+  // String deepgramURL = "https://api.deepgram.com/v1/listen?model=nova-2-general&detect_language=true"; // Or use auto-detect
+
+  // Begin HTTPS connection
+  if (!https.begin(client, deepgramURL)) {
+    Serial.println("ERROR - HTTPS begin failed. Check URL and client setup.");
+    return "";
   }
 
-  // Add necessary headers
-  https.addHeader("Content-Type", "audio/wav");
+  // Add Headers
   https.addHeader("Authorization", String("Token ") + deepgramApiKey);
-  https.addHeader("Connection", "close"); // Explicitly close connection
+  https.addHeader("Content-Type", "audio/wav");
+  https.addHeader("Connection", "close");
 
-  // Open the recorded file for reading
+  // Open recorded file for reading
   File audioFile = SPIFFS.open(FILENAME, "r");
   if (!audioFile) {
-    Serial.println("ERROR - Failed to open audio file for reading");
+    Serial.printf("ERROR - Failed to open audio file '%s' for reading!\n", FILENAME);
     https.end();
-    return ""; // Return empty on failure
+    return "";
   }
   if (!audioFile.available()) {
-      Serial.println("ERROR - Audio file is empty or unavailable.");
+      Serial.printf("ERROR - Audio file '%s' is empty or unavailable.\n", FILENAME);
       audioFile.close();
       https.end();
       return "";
   }
 
   size_t fileSize = audioFile.size();
-  Serial.printf("Sending %s (%d bytes) to Deepgram...\n", FILENAME, fileSize);
+  // Sanity check file size - is it reasonable?
+  size_t expectedMinSize = WAV_HDR_SIZE + (SAMPLE_RATE * BYTES_PER_SAMPLE / 5); // Header + ~0.2s audio
+  if (fileSize < expectedMinSize) {
+      Serial.printf("Warning: Audio file size (%d bytes) seems very small. Uploading anyway.\n", fileSize);
+  }
+  Serial.printf("Sending '%s' (%d bytes) to Deepgram...\n", FILENAME, fileSize);
 
-  // Send the file using stream method
+  // Send the POST request with the file stream
   int httpCode = https.sendRequest("POST", &audioFile, fileSize);
-  audioFile.close(); // Close the file *after* request is sent
+  audioFile.close(); // Close file AFTER sending
 
-  Serial.printf("HTTP response code: %d\n", httpCode);
+  Serial.printf("Deepgram HTTP response code: %d\n", httpCode);
 
-  // Process the response
+  // Process response
   String response = "";
-  if (httpCode > 0) { // Check if we got any HTTP status code
-    response = https.getString(); // Get response payload regardless of code initially
-    if (httpCode >= 200 && httpCode < 300) { // Success range
+  if (httpCode > 0) { // Got a response code from server
+    response = https.getString(); // Get payload
+
+    if (httpCode >= 200 && httpCode < 300) { // Success codes (2xx)
       Serial.println("Deepgram request successful.");
-      // Optionally print raw response for debugging:
-      // Serial.println("Raw Response: " + response);
-    } else {
-      // Handle HTTP errors (4xx, 5xx)
+      // Serial.println("Raw Response: " + response); // Uncomment for debug
+    } else { // Error codes (4xx, 5xx)
       Serial.printf("ERROR - Deepgram request failed with HTTP code: %d\n", httpCode);
-      Serial.println("Error Payload: " + response); // Print error message from Deepgram
-      response = ""; // Clear response string on error to indicate failure
+      Serial.println("Error Payload: " + response);
+      response = ""; // Return empty string on API error
     }
-  } else {
-    // Handle connection errors (httpCode < 0)
+  } else { // Connection or other HTTPS errors (httpCode < 0)
     Serial.printf("ERROR - HTTPS request failed. Error: %s\n", https.errorToString(httpCode).c_str());
-    response = ""; // Clear response string on error
+    response = ""; // Return empty string on connection error
   }
 
   https.end(); // Release resources
 
-  // Short delay for stability
-  yield();
-  // delay(100);
-
   if (response.isEmpty() && httpCode >= 200 && httpCode < 300) {
-      Serial.println("Warning: Successful HTTP code but empty response body.");
-      // This might be valid depending on the API, but often indicates an issue.
+      Serial.println("Warning: Successful HTTP code from Deepgram but received empty response body.");
   }
 
-  return response; // Return the JSON response or empty string
+  return response; // Return JSON response or empty string
 }
 
-// Parse the Deepgram JSON response
-// Returns the transcribed text or an empty string on failure/no transcript.
+/**
+ * @brief Parses the JSON response from Deepgram to extract the transcript.
+ * @param response The JSON string received from Deepgram.
+ * @return String containing the transcribed text, or empty string on failure or no transcript.
+ */
 String parseTranscription(String response) {
   if (response.isEmpty()) {
     Serial.println("Parsing skipped: Empty response received.");
     return "";
   }
 
-  // Adjust JSON document size based on expected response complexity
-  // DynamicJsonDocument doc(ESP.getMaxAllocHeap() / 4); // Example: Use portion of available heap
-  DynamicJsonDocument doc(3072); // Increased size, adjust as needed
+  // Adjust document size based on expected response complexity
+  // Start reasonably large, monitor memory usage if needed.
+  DynamicJsonDocument doc(3072);
   DeserializationError jsonError = deserializeJson(doc, response);
 
   if (jsonError) {
-    Serial.print("JSON parsing failed: ");
+    Serial.print("ERROR - JSON parsing failed: ");
     Serial.println(jsonError.c_str());
-    // Print response only if parsing failed, might be large
-    // Serial.println("Response causing error was: ");
-    // Serial.println(response);
-    return ""; // Return empty on parsing error
+    // Avoid printing the whole response here unless debugging memory issues
+    return "";
   }
 
-  // Safely navigate the JSON structure
-  JsonVariant transcriptVar = doc["results"][0]["channels"][0]["alternatives"][0]["transcript"];
+  // Safely navigate the JSON structure (adjust path if Deepgram format changes)
+  JsonVariant transcriptVar = doc["results"]["channels"][0]["alternatives"][0]["transcript"];
 
   if (transcriptVar.isNull() || !transcriptVar.is<const char*>()) {
-    Serial.println("ERROR - Transcript data not found or not a string in JSON response.");
-    // Optionally print the JSON structure for debugging:
-    // serializeJsonPretty(doc, Serial);
-    // Serial.println();
-    return ""; // Return empty if transcript path is invalid
+    Serial.println("ERROR - Transcript data not found or not a string in Deepgram JSON response.");
+    Serial.println("Check JSON structure. Response was:");
+    serializeJsonPretty(doc, Serial); // Print structure for debugging
+    Serial.println();
+    return "";
   }
 
   // Extract the transcript
@@ -353,47 +362,57 @@ String parseTranscription(String response) {
   return transcript;
 }
 
-// Main orchestrator function
-// Returns the final transcribed string or an empty string on failure at any step.
+
+/**
+ * @brief Orchestrates the entire process: records audio, sends for transcription, parses result.
+ * @return String containing the final transcribed text, or empty string on failure at any step.
+ */
 String recordAndTranscribe() {
   // Ensure SPIFFS is initialized in the main setup() before calling this
-  Serial.println("Starting record and transcribe process...");
+  Serial.println("--- Starting Record and Transcribe Process ---");
 
   // Step 1: Record audio
+  Serial.println("Step 1: Recording Audio...");
   if (!recordAudio()) {
-    Serial.println("Recording step failed!");
-    // No SPIFFS.end() here, assume main sketch handles it if needed
-    return ""; // Return empty string on failure
+    Serial.println("Step 1 FAILED: Recording audio was unsuccessful.");
+    // Optional: Clean up failed recording file?
+    // if (SPIFFS.exists(FILENAME)) SPIFFS.remove(FILENAME);
+    Serial.println("--- Record and Transcribe Process FAILED ---");
+    return ""; // Exit if recording failed
   }
-  Serial.println("Recording step completed successfully.");
+  Serial.println("Step 1 SUCCESS: Audio recorded.");
 
   // Step 2: Transcribe audio (requires WiFi connection)
+  Serial.println("Step 2: Sending Audio for Transcription...");
   String jsonResponse = transcribeAudio();
   if (jsonResponse.isEmpty()) {
-    Serial.println("Transcription step failed!");
-    // No SPIFFS.end() here
-    return ""; // Return empty string on failure
+    Serial.println("Step 2 FAILED: Transcription request failed or returned error.");
+    Serial.println("--- Record and Transcribe Process FAILED ---");
+    return ""; // Exit if transcription failed
   }
-  Serial.println("Transcription step completed successfully.");
+  Serial.println("Step 2 SUCCESS: Received response from Deepgram.");
 
   // Step 3: Parse response to get transcript
+  Serial.println("Step 3: Parsing Transcription...");
   String finalTranscript = parseTranscription(jsonResponse);
   if (finalTranscript.isEmpty()) {
-      Serial.println("Parsing step failed or no transcript found.");
-      // Still return empty string from parseTranscription
+      Serial.println("Step 3 FAILED: Parsing failed or no transcript found in response.");
+      // Note: process doesn't necessarily "fail" here, just didn't get text
   } else {
-      Serial.println("Parsing step completed successfully.");
+       Serial.println("Step 3 SUCCESS: Transcript parsed.");
   }
 
-  // Optional: Clean up the recorded file if no longer needed
-  // if (SPIFFS.exists(FILENAME)) {
-  //   SPIFFS.remove(FILENAME);
-  //   Serial.printf("Removed temporary file: %s\n", FILENAME);
-  // }
+  // Optional: Clean up the recorded file now that it's processed
+  if (SPIFFS.exists(FILENAME)) {
+    if(SPIFFS.remove(FILENAME)) {
+        Serial.printf("Cleaned up temporary file: %s\n", FILENAME);
+    } else {
+        Serial.printf("Warning: Failed to remove temporary file: %s\n", FILENAME);
+    }
+  }
 
-  Serial.println("Record and transcribe process finished.");
-  return finalTranscript; // Return the parsed transcript (or "" if any step failed)
+  Serial.println("--- Record and Transcribe Process Finished ---");
+  return finalTranscript; // Return the parsed transcript (or "" if parsing failed)
 }
 
-// NO setup() or loop() functions in this file.
-// They should exist in your main sketch .ino file.
+// End of audio_functions.ino
