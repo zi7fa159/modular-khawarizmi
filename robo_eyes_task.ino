@@ -51,6 +51,7 @@ void eyeControllerTask(void *pvParameters) {
     bool currentlyEnabled = true;
 
     // Apply initial default settings once task starts
+    // Note: robotEyes.begin() must have been called successfully in setupEyeSystem() before this task runs
     robotEyes.setAutoblinker(true, 3, 2);
     robotEyes.setIdleMode(true, 2, 2);
     robotEyes.setMood(DEFAULT);
@@ -68,14 +69,15 @@ void eyeControllerTask(void *pvParameters) {
                 case CMD_SET_ENABLED:
                     currentlyEnabled = receivedCommand.value.enabled;
                     if (!currentlyEnabled) { display.clearDisplay(); display.display(); } // Clear screen if disabled
-                    // else { robotEyes.begin(&display); } // Optional: Re-init display state if needed on enable
+                    // else { /* Optional: Re-init display state if needed on enable */ }
                     break;
             }
         }
 
-        // 2. Update the eye graphics if enabled
+        // 2. Update the eye graphics AND display on screen if enabled
         if (currentlyEnabled) {
-             robotEyes.update(); // Draw the eyes based on current settings
+             robotEyes.update(); // Prepare the eye graphics in the display buffer
+             display.display();  // <<< *** CRITICAL FIX ADDED HERE *** Sends buffer to the OLED screen
         }
 
         // 3. Wait precisely until the next update interval
@@ -136,7 +138,7 @@ bool setupEyeSystem() {
     eyeCommandQueue = xQueueCreate(EYE_COMMAND_QUEUE_LENGTH, sizeof(EyeCommand));
     if (!eyeCommandQueue) { Serial.println("E: Eye Queue creation failed!"); return false; }
 
-    // 2. Initialize the OLED display via I2C
+    // 2. Initialize the OLED display via I2C (Assumes Wire.begin() was called previously in main setup)
     if (!display.begin(I2C_ADDRESS, true)) { // true = reset display
         Serial.println("E: OLED Display initialization failed!");
         vQueueDelete(eyeCommandQueue); eyeCommandQueue = NULL; // Clean up queue
@@ -144,10 +146,11 @@ bool setupEyeSystem() {
     }
     display.setRotation(0); // Adjust 0, 1, 2, 3 if screen is rotated
     display.clearDisplay(); // Clear buffer
-    display.display();      // Push buffer to screen
+    display.display();      // Push empty buffer to screen initially
     Serial.println("OLED Initialized.");
 
     // 3. Initialize the RoboEyes library instance
+    // Note: Assuming robotEyes.begin doesn't return a status, or we're ignoring it.
     robotEyes.begin(&display, SCREEN_WIDTH, SCREEN_HEIGHT);
     Serial.println("RoboEyes Library Initialized.");
 
@@ -164,6 +167,7 @@ bool setupEyeSystem() {
     if (taskCreated != pdPASS) {
         Serial.println("E: Eye Task creation failed!");
         vQueueDelete(eyeCommandQueue); eyeCommandQueue = NULL; // Clean up queue
+        // Consider potentially calling display.end() or similar if available
         return false;
     }
     Serial.println("Eye Background Task Started.");
