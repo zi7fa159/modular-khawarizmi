@@ -17,6 +17,7 @@
 // 3. Partition Scheme: Ensure you've selected a partition scheme in Arduino IDE Tools menu
 //    that provides sufficient SPIFFS space (e.g., Default, Huge App, or >= 1MB SPIFFS).
 //    Re-upload after changing the partition scheme.
+// 4. Serial Monitor MUST be initialized (Serial.begin()) in the main setup() for gain input.
 // ---
 
 // Deepgram API key – replace with your actual key
@@ -43,7 +44,9 @@ const char* FILENAME    = "/rec.wav"; // Filename on SPIFFS
 // --- Define the audio gain multiplier ---
 // Adjust this value to increase/decrease volume.
 // 1.0 = no change, > 1.0 = amplify, < 1.0 = attenuate.
-#define AUDIO_GAIN_MULTIPLIER 2.0f
+// This is now a variable that can be changed via Serial Monitor.
+// #define AUDIO_GAIN_MULTIPLIER 2.0f // <-- REMOVED
+float audioGain = 2.0f; // Default gain value, can be changed via Serial Monitor
 
 // Global flag for I2S state (use cautiously if functions could be interrupted)
 bool i2s_installed = false;
@@ -144,7 +147,8 @@ bool recordAudio() {
   }
 
   // --- Recording Loop ---
-  Serial.printf("Recording for %d seconds with gain %.2f...\n", RECORD_TIME, AUDIO_GAIN_MULTIPLIER);
+  // Serial.printf("Recording for %d seconds with gain %.2f...\n", RECORD_TIME, AUDIO_GAIN_MULTIPLIER); // <-- OLD
+  Serial.printf("Recording for %d seconds with gain %.2f...\n", RECORD_TIME, audioGain); // <-- NEW: Use the variable
   uint8_t i2s_read_buffer[I2S_BUFFER_SIZE]; // Buffer to hold data from I2S driver
   size_t bytesRead = 0;
   uint32_t totalAudioBytes = 0; // Track successfully written audio bytes
@@ -171,7 +175,8 @@ bool recordAudio() {
         // Apply gain using floating point for accuracy with non-integer gains.
         // Use int32_t for the intermediate result to prevent overflow during multiplication,
         // as int16_t * gain can exceed the int16_t range.
-        int32_t amplified_sample = (int32_t)((float)samples[i] * AUDIO_GAIN_MULTIPLIER);
+        // int32_t amplified_sample = (int32_t)((float)samples[i] * AUDIO_GAIN_MULTIPLIER); // <-- OLD
+        int32_t amplified_sample = (int32_t)((float)samples[i] * audioGain); // <-- NEW: Use the variable
 
         // Clamp the amplified sample to the valid range for int16_t.
         // This prevents clipping distortion caused by wrap-around (e.g., 32768 becoming -32768).
@@ -520,18 +525,67 @@ HandleJsonError:
 
 /**
  * @brief Orchestrates the entire process: records audio, sends for transcription, parses result.
+ *        Also prompts for audio gain adjustment via Serial Monitor before recording.
  * @return String containing the final transcribed text, or empty string on failure at any step.
  */
 String recordAndTranscribe() {
   // Ensure SPIFFS is initialized in the main setup() before calling this
   Serial.println("\n--- Starting Record and Transcribe Process ---");
 
+  // === NEW: GET GAIN FROM SERIAL MONITOR ===
+  Serial.println("--- Gain Adjustment ---");
+  Serial.printf("Current audio gain: %.2f\n", audioGain);
+  Serial.println("Enter new gain value (e.g., 1.5) and press Enter, or just press Enter to keep current.");
+  Serial.println("Waiting for input (max 5 seconds)...");
+  Serial.print("> ");
+
+  unsigned long serialInputStartTime = millis();
+  bool inputReceived = false;
+
+  // Wait for serial input with a timeout
+  while (millis() - serialInputStartTime < 5000) { // 5 second timeout
+      if (Serial.available() > 0) {
+          inputReceived = true;
+          break;
+      }
+      yield(); // Allow background tasks while waiting
+  }
+
+  if (inputReceived) {
+      // Read the entire line entered by the user
+      String inputLine = Serial.readStringUntil('\n');
+      inputLine.trim(); // Remove leading/trailing whitespace (including potential \r)
+
+      if (inputLine.length() > 0) {
+          // Attempt to convert the input string to a float
+          char* endptr; // Used by strtof
+          float newGain = strtof(inputLine.c_str(), &endptr);
+
+          // Check if conversion was successful and the entire string was used (or only whitespace remains)
+          // And validate the gain value (e.g., non-negative)
+          if (*endptr == '\0' && newGain >= 0.0f) { // Check endptr for full conversion, allow 0.0f gain
+              audioGain = newGain;
+              Serial.printf("Gain set to: %.2f\n", audioGain);
+          } else {
+              Serial.println("Invalid input (not a valid non-negative number). Keeping previous gain.");
+          }
+      } else {
+           Serial.println("No value entered. Keeping previous gain.");
+      }
+      // Consume any remaining characters in the serial buffer just in case
+      while(Serial.available()) Serial.read();
+  } else {
+      Serial.println("\nTimeout waiting for input. Keeping previous gain.");
+  }
+  Serial.println("-----------------------");
+  // === END NEW ===
+
+
   // Step 1: Record audio with gain
   Serial.println("Step 1: Recording Audio...");
   if (!recordAudio()) {
     Serial.println("Step 1 FAILED: Recording audio was unsuccessful.");
     // Note: recordAudio() should handle I2S cleanup on its internal failures.
-    // We don't need to explicitly call i2s_driver_uninstall here unless recordAudio doesn't guarantee it.
     // Optional: Clean up potentially incomplete recording file if it exists
     if (SPIFFS.exists(FILENAME)) {
         if (SPIFFS.remove(FILENAME)) {
@@ -563,11 +617,8 @@ String recordAndTranscribe() {
   // parseTranscription returns "" on failure OR if the transcript field itself was empty.
   if (finalTranscript.isEmpty() && !jsonResponse.isEmpty()) {
       // Distinguish between parsing failure and genuinely empty transcript
-      // We know jsonResponse wasn't empty here. Check if parsing failed vs transcript field was empty.
       // Note: The parseTranscription function already prints detailed errors.
       Serial.println("Step 3 Note: Parsing finished, but no transcript text was extracted (either parsing error or empty transcript).");
-      // Depending on requirements, you might treat this as a failure or just an empty result.
-      // For now, we proceed but the returned string will be empty.
   } else if (!finalTranscript.isEmpty()) {
        Serial.println("Step 3 SUCCESS: Transcript parsed.");
   }
